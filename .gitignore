@@ -1,0 +1,15 @@
+.work/
+build/
+*.elf
+*.nro
+*.nacp
+release/
+runtime/
+game/
+*.pck
+*.so
+*.zip
+*.exe
+*.x86_64
+__pycache__/
+assets/
