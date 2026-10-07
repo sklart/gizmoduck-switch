@@ -112,7 +112,7 @@ delsonazevedo и fgsfds/NaGaa95/elliencode; игровые ресурсы и п�
 выполните:
 
 ```sh
-python scripts/prepare_port.py "D:/Download/Gizmoduck-1.1.16-win64.zip" --replace
+python scripts/prepare_port.py "D:/Gizmoduck-1.1.16-win64.zip" --replace
 ```
 
 Сценарий находит `Gizmoduck.exe` внутри указанного официального ZIP, извлекает
