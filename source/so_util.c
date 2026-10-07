@@ -34,6 +34,25 @@
 
 static so_module *so_list = NULL;
 
+// Large sequential reads avoid a long sequence of small FAT32 requests while
+// loading the Godot runtime from the SD card.  The file is still fully checked
+// by the ELF parser below; this only changes the I/O granularity.
+#define SO_READ_CHUNK (4 * 1024 * 1024)
+
+static int so_read_all(FILE *file, void *destination, size_t size) {
+  char *cursor = destination;
+  size_t remaining = size;
+  while (remaining) {
+    const size_t want = remaining > SO_READ_CHUNK ? SO_READ_CHUNK : remaining;
+    const size_t got = fread(cursor, 1, want, file);
+    if (got != want)
+      return -1;
+    cursor += got;
+    remaining -= got;
+  }
+  return 0;
+}
+
 void hook_arm64(uintptr_t addr, uintptr_t dst) {
   if (addr == 0)
     return;
@@ -111,9 +130,16 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
   if (fd == NULL)
     return -1;
 
-  fseek(fd, 0, SEEK_END);
-  mod->so_size = ftell(fd);
-  fseek(fd, 0, SEEK_SET);
+  if (fseek(fd, 0, SEEK_END) != 0) {
+    fclose(fd);
+    return -1;
+  }
+  long file_size = ftell(fd);
+  if (file_size <= 0 || fseek(fd, 0, SEEK_SET) != 0) {
+    fclose(fd);
+    return -1;
+  }
+  mod->so_size = (size_t)file_size;
 
   mod->so_base = malloc(mod->so_size);
   if (!mod->so_base) {
@@ -121,7 +147,11 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
     return -2;
   }
 
-  fread(mod->so_base, mod->so_size, 1, fd);
+  if (so_read_all(fd, mod->so_base, mod->so_size) != 0) {
+    fclose(fd);
+    res = -5;
+    goto err_free_so;
+  }
   fclose(fd);
 
   if (memcmp(mod->so_base, ELFMAG, SELFMAG) != 0) {
@@ -335,7 +365,7 @@ static uintptr_t so_lookup_export(so_module *mod, const char *name) {
 static uintptr_t so_resolve_symbol(so_module *mod, DynLibFunction *funcs, int num_funcs, const char *name) {
   // Prefer Switch shims over exports from other loaded modules.
   for (int k = 0; k < num_funcs; k++) {
-    if (strcmp(name, funcs[k].symbol) == 0)
+    if (name[0] == funcs[k].symbol[0] && strcmp(name, funcs[k].symbol) == 0)
       return funcs[k].func;
   }
 
@@ -352,13 +382,29 @@ static uintptr_t so_resolve_symbol(so_module *mod, DynLibFunction *funcs, int nu
 
 int so_resolve(so_module *mod, DynLibFunction *funcs, int num_funcs, int taint_missing_imports) {
   int missing = 0;
+  size_t cache_hits = 0;
+  // A relocation table frequently refers to the same dynamic symbol many
+  // times.  Keep results only for this resolve pass: addends still apply to
+  // every relocation, while the expensive name lookup runs at most once per
+  // symbol.  A failed allocation deliberately falls back to the old path.
+  uintptr_t *symbol_cache = mod->num_syms > 0 ? calloc((size_t)mod->num_syms, sizeof(*symbol_cache)) : NULL;
+  uint8_t *symbol_state = mod->num_syms > 0 ? calloc((size_t)mod->num_syms, sizeof(*symbol_state)) : NULL;
+  if (!symbol_cache || !symbol_state) {
+    free(symbol_cache);
+    free(symbol_state);
+    symbol_cache = NULL;
+    symbol_state = NULL;
+  }
   for (int i = 0; i < mod->elf_hdr->e_shnum; i++) {
     char *sh_name = mod->shstrtab + mod->sec_hdr[i].sh_name;
     if (strcmp(sh_name, ".rela.dyn") == 0 || strcmp(sh_name, ".rela.plt") == 0) {
       Elf64_Rela *rels = (Elf64_Rela *)((uintptr_t)mod->load_base + mod->sec_hdr[i].sh_addr);
       for (size_t j = 0; j < mod->sec_hdr[i].sh_size / sizeof(Elf64_Rela); j++) {
         uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_base + rels[j].r_offset);
-        Elf64_Sym *sym = &mod->syms[ELF64_R_SYM(rels[j].r_info)];
+        const size_t symbol_index = ELF64_R_SYM(rels[j].r_info);
+        if (symbol_index >= (size_t)mod->num_syms)
+          fatal_error("Error: invalid relocation symbol index:\n%u\n", (unsigned)symbol_index);
+        Elf64_Sym *sym = &mod->syms[symbol_index];
 
         int type = ELF64_R_TYPE(rels[j].r_info);
         switch (type) {
@@ -368,10 +414,23 @@ int so_resolve(so_module *mod, DynLibFunction *funcs, int num_funcs, int taint_m
           {
             if (sym->st_shndx == SHN_UNDEF) {
               char *name = mod->dynstrtab + sym->st_name;
-              uintptr_t addr = so_resolve_symbol(mod, funcs, num_funcs, name);
-              if (addr) {
+              uintptr_t addr = 0;
+              unsigned state = 0;
+              if (symbol_state && symbol_state[symbol_index]) {
+                state = symbol_state[symbol_index];
+                addr = symbol_cache[symbol_index];
+                cache_hits++;
+              } else {
+                addr = so_resolve_symbol(mod, funcs, num_funcs, name);
+                state = addr ? 1 : (ELF64_ST_BIND(sym->st_info) == STB_WEAK ? 2 : 3);
+                if (symbol_state) {
+                  symbol_cache[symbol_index] = addr;
+                  symbol_state[symbol_index] = (uint8_t)state;
+                }
+              }
+              if (state == 1) {
                 *ptr = addr + rels[j].r_addend;
-              } else if (ELF64_ST_BIND(sym->st_info) == STB_WEAK) {
+              } else if (state == 2) {
                 // weak undefined (e.g. _ZTH* thread-local inits): the ABI says
                 // resolve to NULL; callers null-check before using them
                 *ptr = 0;
@@ -394,8 +453,13 @@ int so_resolve(so_module *mod, DynLibFunction *funcs, int num_funcs, int taint_m
     }
   }
 
+  free(symbol_cache);
+  free(symbol_state);
+
   if (missing)
     debugPrintf("%s: %d unresolved imports\n", mod->name, missing);
+  if (cache_hits)
+    debugPrintf("%s: %u relocation symbol-cache hits\n", mod->name, (unsigned)cache_hits);
 
   return 0;
 }

@@ -140,6 +140,21 @@ static void set_screen_size(int w, int h) {
   }
 }
 
+static void configure_mesa_shader_cache(void) {
+  char cache_dir[300];
+  snprintf(cache_dir, sizeof(cache_dir), "%s/cache/mesa", config.save_root);
+  ensure_directory(cache_dir);
+  // Mesa decides whether this build supports a disk cache.  These standard
+  // variables make it persistent when it does, without changing rendering
+  // behaviour on older switch-mesa builds that ignore them.
+  setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
+  setenv("MESA_GLSL_CACHE_DIR", cache_dir, 1);
+  setenv("MESA_SHADER_CACHE_MAX_SIZE", "128M", 1);
+  unsetenv("MESA_SHADER_CACHE_DISABLE");
+  unsetenv("MESA_GLSL_CACHE_DISABLE");
+  debugPrintf("== Mesa shader cache: %s ==\n", cache_dir);
+}
+
 // ---------------------------------------------------------------------------
 // EGL / GLES3 context (mesa). Godot's android GL path expects an external
 // context that is current on the thread that calls step(), so the wrapper
@@ -796,6 +811,7 @@ int main(void) {
     snprintf(android_root, sizeof(android_root), "%s/android_root", config.data_root);
     setenv("ANDROID_ROOT", android_root, 1);
   }
+  configure_mesa_shader_cache();
 
   set_screen_size(config.screen_width, config.screen_height);
 
@@ -807,11 +823,15 @@ int main(void) {
 
   // libc++ first so libgodot's C++ ABI imports resolve against it
   load_module(&cxx_mod, CXX_SO_NAME, heap_so_base, CXX_SO_SLICE);
+  stats_mark("loaded libc++ runtime");
   void *game_base = (char *)heap_so_base + CXX_SO_SLICE;
   load_module(&game_mod, SO_NAME, game_base, heap_so_limit - CXX_SO_SLICE);
+  stats_mark("loaded Godot runtime");
 
   gizmoduck_resolve_imports(&cxx_mod);
+  stats_mark("resolved libc++ imports");
   gizmoduck_resolve_imports(&game_mod);
+  stats_mark("resolved Godot imports");
   debugPrintf("== imports resolved ==\n");
 
   // resolve exports before so_finalize maps the code and locks load_base out
