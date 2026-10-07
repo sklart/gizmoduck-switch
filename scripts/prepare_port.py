@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Prepare a complete local Gizmoduck Switch SD-card directory from a legal Windows copy.
+"""Prepare a complete local Gizmoduck Switch SD-card directory from a legal ZIP or EXE.
 
 No game data, runtime, font, icon, PCK, or generated SD-card files are kept in
-the repository.  This helper obtains them locally from a user-supplied EXE and
+the repository.  This helper obtains them locally from a user-supplied official ZIP
+or already extracted EXE and
 official upstream downloads, then invokes the existing packager.
 """
 from __future__ import annotations
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 
@@ -45,11 +47,41 @@ def powershell() -> str:
     raise RuntimeError("PowerShell was not found; install PowerShell to extract the NRO icon")
 
 
+def source_executable(source: Path, work: Path) -> Path:
+    """Return an EXE directly, or extract exactly one Gizmoduck.exe from a ZIP."""
+    if source.suffix.lower() != ".zip":
+        return source
+
+    try:
+        with zipfile.ZipFile(source) as archive:
+            candidates = [
+                entry for entry in archive.infolist()
+                if not entry.is_dir() and Path(entry.filename).name.lower() == "gizmoduck.exe"
+            ]
+            if len(candidates) != 1:
+                names = ", ".join(entry.filename for entry in candidates) or "none"
+                raise ValueError(
+                    "archive must contain exactly one Gizmoduck.exe "
+                    f"(found: {names})"
+                )
+            extracted = work / "source" / "Gizmoduck.exe"
+            extracted.parent.mkdir(parents=True, exist_ok=True)
+            print("extracting", candidates[0].filename, "from", source)
+            with archive.open(candidates[0]) as input_file, extracted.open("wb") as output_file:
+                shutil.copyfileobj(input_file, output_file)
+            return extracted
+    except zipfile.BadZipFile as error:
+        raise ValueError(f"not a valid ZIP archive: {source}") from error
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Prepare a Gizmoduck Switch port from a user-supplied Gizmoduck.exe"
+        description="Prepare a Gizmoduck Switch port from an official ZIP or Gizmoduck.exe"
     )
-    parser.add_argument("executable", type=Path, help="official Gizmoduck Windows executable")
+    parser.add_argument(
+        "source", type=Path,
+        help="official Gizmoduck Windows ZIP (preferred) or an already extracted Gizmoduck.exe",
+    )
     parser.add_argument("--work-dir", type=Path, default=ROOT / ".work" / "gizmoduck-port")
     parser.add_argument("--output", type=Path, default=ROOT / "release" / "switch" / "gizmoduck")
     parser.add_argument("--replace", action="store_true", help="replace an existing work/output directory")
@@ -60,9 +92,9 @@ def main() -> None:
     parser.add_argument("--skip-build", action="store_true", help="use an already built gizmoduck.nro")
     args = parser.parse_args()
 
-    exe = args.executable.resolve()
-    if not exe.is_file():
-        raise SystemExit(f"executable was not found: {exe}")
+    source = args.source.resolve()
+    if not source.is_file():
+        raise SystemExit(f"source file was not found: {source}")
     work = args.work_dir.resolve()
     output = args.output.resolve()
     if (work.exists() or output.exists()) and not args.replace:
@@ -71,6 +103,11 @@ def main() -> None:
         for directory in (work, output):
             if directory.exists():
                 shutil.rmtree(directory)
+
+    try:
+        exe = source_executable(source, work)
+    except ValueError as error:
+        raise SystemExit(error) from error
 
     assets = work / "assets"
     pck = work / "game.pck"

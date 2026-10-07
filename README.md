@@ -14,7 +14,7 @@
 ### Что потребуется
 
 - Nintendo Switch с настроенным homebrew;
-- легально полученная Windows-версия Gizmoduck;
+- легально полученный официальный ZIP Gizmoduck для Windows;
 - готовая папка порта, собранная владельцем игры по инструкции ниже.
 
 > [!IMPORTANT]
@@ -112,10 +112,12 @@ delsonazevedo и fgsfds/NaGaa95/elliencode; игровые ресурсы и п�
 выполните:
 
 ```sh
-python scripts/prepare_port.py "C:/Games/Gizmoduck/Gizmoduck.exe" --replace
+python scripts/prepare_port.py "D:/Download/Gizmoduck-1.1.16-win64.zip" --replace
 ```
 
-Сценарий извлекает PCK, распакованные ассеты и JPEG-иконку из указанного `.exe`,
+Сценарий находит `Gizmoduck.exe` внутри указанного официального ZIP, извлекает
+его во временную папку, а затем получает из него PCK, распакованные ассеты и
+JPEG-иконку. Также он
 получает официальный Godot Android runtime и Noto Sans CJK, собирает NRO,
 формирует `release/switch/gizmoduck/` и проверяет итоговую раскладку.
 
@@ -132,7 +134,9 @@ python scripts/prepare_port.py "C:/Games/Gizmoduck/Gizmoduck.exe" --replace
 
 ### Ручная последовательность
 
-Для новой версии игры запустите `prepare_port.py` с её новым `.exe`. При
+Для новой версии игры запустите `prepare_port.py` с её новым официальным ZIP.
+Сценарий также принимает уже распакованный `Gizmoduck.exe`, но ZIP предпочтителен:
+это исходный неизменённый файл релиза. При
 необходимости этапы можно выполнить отдельно: `prepare_game.py`, `make_pck.py`,
 `prepare_runtime.py`, `extract_original_icon.ps1`, `make`, `package_sd.py` и
 `verify_sd_layout.py`.
